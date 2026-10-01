@@ -1,0 +1,155 @@
+import pandas as pd
+from prophet import Prophet
+from sklearn.metrics import mean_absolute_error
+
+
+# En dessous de ce nombre de mois d'historique, Prophet est peu fiable.
+MIN_MONTHS_RECOMMENDED = 24
+
+
+def prepare_for_prophet(df: pd.DataFrame, product_name: str) -> pd.DataFrame:
+    """
+    Filtre le DataFrame pour un produit donné et le convertit
+    au format attendu par Prophet : colonnes 'ds' (date) et 'y' (valeur).
+    """
+
+    product_df = df[df["product"] == product_name].copy()
+
+    product_df = product_df.rename(
+        columns={
+            "date": "ds",
+            "quantity": "y"
+        }
+    )
+
+    return (
+        product_df[["ds", "y"]]
+        .sort_values("ds")
+        .reset_index(drop=True)
+    )
+
+
+def _backtest(
+    prophet_df: pd.DataFrame, horizon: int, confidence_level: float
+) -> float | None:
+    """
+    Cache les `horizon` derniers mois, entraîne Prophet sur le reste,
+    puis compare les prédictions aux valeurs réelles cachées.
+
+    Returns
+    -------
+    float ou None
+        Le MAE du backtest, ou None si pas assez de données pour le faire.
+    """
+
+    if len(prophet_df) <= horizon:
+        return None
+
+    train = prophet_df.iloc[:-horizon]
+    test = prophet_df.iloc[-horizon:]
+
+    model = Prophet(interval_width=confidence_level)
+    model.fit(train)
+
+    future = model.make_future_dataframe(periods=horizon, freq="MS")
+    forecast = model.predict(future)
+
+    # Les ventes ne peuvent pas être négatives
+    predictions_test = forecast["yhat"].tail(horizon).clip(lower=0).values
+
+    return mean_absolute_error(test["y"].values, predictions_test)
+
+
+def forecast_prophet(
+    df: pd.DataFrame,
+    product_name: str,
+    horizon: int = 1,
+    confidence_level: float = 0.90
+) -> dict:
+    """
+    Prédit les `horizon` prochains mois pour un produit avec Prophet.
+
+    Le pipeline (forecasting -> optimisation) fonctionne mois par mois :
+    horizon=1 est la valeur attendue en production (l'optimisation
+    n'accepte qu'une seule valeur de demande par produit, cf.
+    optimization.constraints.generate_demand_scenarios) ; un horizon
+    plus grand reste utilisable pour du forecasting pur (tests,
+    visualisation), juste pas pour nourrir l'optimisation telle quelle.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Données contenant au minimum 'date', 'product', 'quantity'.
+    product_name : str
+        Le produit à prévoir.
+    horizon : int
+        Nombre de mois à prédire (et taille du backtest).
+    confidence_level : float
+        Niveau de confiance de l'intervalle [lower, upper] -- passé
+        directement à Prophet comme `interval_width` (ex : 0.90 ->
+        yhat_lower/yhat_upper = 5e/95e percentile).
+
+    Returns
+    -------
+    dict
+        {
+            "predictions": [...],       # yhat pour les mois futurs
+            "lower": [...],             # borne basse de l'intervalle
+            "upper": [...],             # borne haute de l'intervalle
+            "dates": [...],             # dates prédites
+            "mae": float ou None,       # erreur mesurée par backtest
+            "n_months_history": int,
+            "warnings": [...]
+        }
+    """
+
+    warnings_list = []
+
+    # 1. Préparer les données
+    prophet_df = prepare_for_prophet(df, product_name)
+
+    if prophet_df.empty:
+        raise ValueError(
+            f"Produit '{product_name}' introuvable dans les données."
+        )
+
+    n_months = len(prophet_df)
+
+    if n_months < MIN_MONTHS_RECOMMENDED:
+        warnings_list.append(
+            f"Seulement {n_months} mois d'historique pour '{product_name}' "
+            f"(recommandé : {MIN_MONTHS_RECOMMENDED}+ mois). "
+            "Les prévisions sont moins fiables."
+        )
+
+    # 2. Backtest : mesurer la qualité du modèle sur des mois déjà connus
+    mae = _backtest(prophet_df, horizon, confidence_level)
+
+    if mae is None:
+        warnings_list.append(
+            "Pas assez de données pour effectuer un backtest "
+            f"(il faut au moins {horizon + 1} mois d'historique)."
+        )
+
+    # 3. Entraîner sur tout l'historique pour prédire le vrai futur
+    model = Prophet(interval_width=confidence_level)
+    model.fit(prophet_df)
+
+    future = model.make_future_dataframe(periods=horizon, freq="MS")
+    forecast = model.predict(future)
+
+    future_forecast = forecast.tail(horizon).copy()
+
+    # 4. Cas limite : pas de ventes négatives
+    for column in ["yhat", "yhat_lower", "yhat_upper"]:
+        future_forecast[column] = future_forecast[column].clip(lower=0)
+
+    return {
+        "predictions": future_forecast["yhat"].tolist(),
+        "lower": future_forecast["yhat_lower"].tolist(),
+        "upper": future_forecast["yhat_upper"].tolist(),
+        "dates": future_forecast["ds"].tolist(),
+        "mae": mae,
+        "n_months_history": n_months,
+        "warnings": warnings_list
+    }

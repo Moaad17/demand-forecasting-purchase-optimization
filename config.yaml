@@ -1,0 +1,8 @@
+holding_cost: 5 #(coût de stockage par unité excédentaire par mois)
+shortage_cost: 20 #(coût de rupture par unité manquante)
+unit_cost: 10 #(coût d'achat par unité -- valeur de repli si use_actual_unit_price est false, ou si un produit n'a pas de unit_price dans les données)
+use_actual_unit_price: true #(si true, utilise le unit_price réel de chaque produit -- colonne des données -- comme coût cᵢ dans l'optimisation, au lieu du unit_cost fixe ci-dessus)
+max_budget: 500000 #(budget total maximum)
+max_capacity: 4500 #(capacité de stockage totale en unités -- recalibrée pour forecast_horizon=1 : la demande mensuelle totale tourne autour de 5450 unités sur sample_beverages.csv, donc 4500 reste une vraie contrainte active sans tout écraser)
+forecast_horizon: 1 #(nombre de mois à prédire -- le pipeline décide mois par mois, cf. optimization/constraints.py)
+confidence_level: 0.90 #(niveau de confiance des quantiles de prévision -- pilote directement Prophet interval_width et XGBoost quantile_alpha à 0.05/0.95)

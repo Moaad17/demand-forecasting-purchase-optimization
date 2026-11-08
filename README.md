@@ -1,378 +1,127 @@
 # Supply Chain Optimizer
 
-Un outil qui répond à une question simple mais coûteuse à mal gérer :
+**Demand forecasting and ordering decisions under uncertainty.**
 
-> **Combien commander de chaque produit pour le mois prochain, quand on ne connaît pas la demande exacte à l'avance ?**
+> How much of each product should we order next month when we don't know demand in advance?
 
-Commander trop → argent immobilisé en stock et coûts de stockage.
-Commander trop peu → ruptures, ventes perdues et clients mécontents.
-
-Ce projet automatise cette décision en combinant **prévision de la demande** (Machine Learning) et **optimisation sous incertitude** (Recherche Opérationnelle), plutôt que de se fier à une intuition ou à une simple moyenne historique.
+Order too much and cash is tied up in stock. Order too little and sales are lost. This project turns a demand forecast, with its uncertainty, into an order quantity that minimizes expected cost under budget and storage constraints.
 
 ---
 
-## Le principe
+<!-- TODO: add a screenshot or GIF of the Streamlit app here: ![App demo](docs/demo.gif) -->
+
+---
+
+## How it works
 
 ```text
-Historique de ventes (CSV)
-         │
-         ▼
-┌──────────────────────────┐
-│    1. FORECASTING        │
-│  Prophet / XGBoost       │
-│                          │
-│  Les modèles sont        │
-│  comparés par backtest   │
-│  et le meilleur est      │
-│  sélectionné              │
-└────────────┬─────────────┘
-             │
-             │ Prévision + incertitude
-             ▼
-┌──────────────────────────┐
-│    2. OPTIMISATION       │
-│  Recherche opérationnelle│
-│                          │
-│  Plusieurs scénarios de  │
-│  demande sont considérés │
-│  pour déterminer la      │
-│  quantité optimale       │
-└────────────┬─────────────┘
-             │
-             ▼
-      Quantité à commander
-        par produit
-             │
-             ▼
-      Coût total attendu
+Sales history (CSV)
+        │
+        ▼
+1. Forecasting      Prophet / XGBoost compared by backtest,
+                    best model kept per product
+        │           → central forecast + lower/upper bounds
+        ▼
+2. Optimization     Demand scenarios (5% / 50% / 95% quantiles)
+                    → two-stage stochastic program
+        │           minimizing expected total cost
+        ▼
+Order quantity per product + expected cost
 ```
 
----
-
-## Pourquoi ce projet est différent
-
-La partie qui distingue ce projet d'un simple :
-
-> *« Je prévois la demande puis j'arrondis le résultat »*
-
-est que l'optimisation ne travaille **pas avec un seul chiffre de demande**.
-
-Elle raisonne sur plusieurs **scénarios possibles de demande**, construits à partir de l'incertitude de la prévision, puis choisit la quantité de commande qui minimise le **coût attendu**.
-
-Le modèle prend ainsi en compte simultanément :
-
-* le coût d'achat ;
-* le coût de rupture ;
-* le coût de surstock ;
-* le budget disponible ;
-* la capacité de stockage ;
-* l'incertitude sur la demande.
-
-Cette approche relève de la **programmation stochastique avec recours**.
-
----
-
-## Comparaison des stratégies
-
-Le projet compare quatre stratégies :
-
-| Stratégie | Description                                                                           |
-| --------- | ------------------------------------------------------------------------------------- |
-| **Naïf**  | Commander selon la moyenne historique                                                 |
-| **EV**    | Commander selon la demande moyenne prévue, sans modéliser explicitement l'incertitude |
-| **HN**    | Optimiser la décision en tenant compte de l'incertitude                               |
-| **WS**    | Coût théorique obtenu si la demande future était connue à l'avance                    |
-
-Le modèle permet ensuite de calculer deux indicateurs importants :
-
-### EVPI — Expected Value of Perfect Information
-
-Mesure la valeur économique de l'information parfaite, c'est-à-dire le gain potentiel si la demande future était connue à l'avance.
-
-### VSS — Value of the Stochastic Solution
-
-Mesure la valeur de l'utilisation d'une optimisation stochastique par rapport à une décision basée uniquement sur la demande moyenne.
-
----
-
-# Pipeline
-
-## 1. Données — `app/data/`
-
-Le pipeline charge un fichier CSV contenant notamment :
-
-* `date`
-* `product`
-* `quantity`
-* `unit_price` *(optionnel)*
-
-Les données sont ensuite :
-
-1. validées ;
-2. nettoyées ;
-3. agrégées ;
-4. complétées lorsque certains mois sont absents ;
-5. enrichies avec des variables temporelles.
-
-Le validateur vérifie notamment :
-
-* les colonnes obligatoires ;
-* les types ;
-* les valeurs manquantes ;
-* les doublons ;
-* le volume minimal d'historique.
-
----
-
-## 2. Prévision — `app/forecasting/`
-
-Pour chaque produit, deux modèles sont entraînés et comparés :
-
-### Prophet
-
-Modèle spécialisé dans les séries temporelles permettant notamment de capturer :
-
-* les tendances ;
-* la saisonnalité ;
-* les variations temporelles.
-
-### XGBoost
-
-Modèle de Machine Learning utilisant des variables construites à partir de l'historique, par exemple :
-
-* demande du mois précédent ;
-* moyennes glissantes ;
-* tendance ;
-* mois de l'année ;
-* prix du produit lorsqu'il est disponible.
-
-### Sélection automatique
-
-Les modèles sont comparés par **backtesting** :
+The key difference from "forecast, then round": the optimizer does not use a single demand number. It reasons over several demand scenarios built from the forecast uncertainty and chooses the order that minimizes expected cost:
 
 ```text
-Historique
-    │
-    ├── Données d'entraînement
-    │
-    └── Derniers mois masqués
-             │
-             ▼
-        Prévision
-             │
-             ▼
-       Calcul de la MAE
+Total cost = purchase cost + expected stockout cost + expected overstock cost
 ```
 
-Le modèle ayant la **MAE la plus faible** est automatiquement sélectionné pour chaque produit.
-
-Le forecasting fournit ensuite :
-
-* une prévision centrale ;
-* une borne basse ;
-* une borne haute.
+subject to a **budget** and a **storage capacity** constraint. The problem is solved with an **L-shaped (Benders) decomposition** (`app/optimization/lshaped.py`).
 
 ---
 
-## 3. Optimisation — `app/optimization/`
+## Pipeline
 
-Le pipeline raisonne sur un horizon d'un mois.
+### 1. Data (`app/data/`)
+Input CSV columns: `date`, `product`, `quantity`, `unit_price` (optional). The data is validated (required columns, types, missing values, duplicates, minimum history), cleaned, aggregated by month, completed where months are missing, and enriched with time features.
 
-Pour chaque produit, les trois quantiles issus du forecasting sont utilisés comme scénarios de demande :
+### 2. Forecasting (`app/forecasting/`)
+For each product, two models are trained and compared:
 
-| Scénario        | Quantile |
-| --------------- | -------: |
-| Demande basse   |      5 % |
-| Demande médiane |     50 % |
-| Demande haute   |     95 % |
+- **Prophet:** trend and seasonality.
+- **XGBoost:** features from history (previous month, rolling means, trend, month of year, price when available).
 
-Ces scénarios alimentent ensuite le modèle d'optimisation.
+Models are compared by backtesting on the last months of history, and the one with the lowest **MAE** is selected per product. The output is a central forecast plus a lower and an upper bound.
 
-L'objectif est de minimiser :
+### 3. Optimization (`app/optimization/`)
+One-month horizon. The 5%, 50% and 95% forecast quantiles are used as demand scenarios. The solver chooses order quantities that minimize expected cost under the budget and capacity constraints.
 
-```text
-Coût total
-    =
-Coût d'achat
-+ Coût attendu de rupture
-+ Coût attendu de surstock
-```
-
-sous contraintes de :
-
-* **budget** ;
-* **capacité de stockage**.
-
-Le problème est résolu à l'aide d'une **décomposition de Benders / L-shaped**, implémentée dans :
-
-```text
-app/optimization/lshaped.py
-```
+### 4. Interface (`frontend/app.py`)
+A Streamlit app to run the pipeline interactively. You can change costs, budget, storage capacity and forecast horizon, and see forecasts, order quantities, demand scenarios, the strategy comparison, EVPI and VSS.
 
 ---
 
-## 4. Interface — `frontend/app.py`
+## Run it
 
-Une application **Streamlit** permet d'exécuter le pipeline de manière interactive.
+```bash
+pip install -r requirements.txt
 
-L'utilisateur peut notamment ajuster :
+# Interactive app
+streamlit run frontend/app.py
 
-* les coûts ;
-* le budget ;
-* la capacité de stockage ;
-* l'horizon de prévision.
+# Command-line demo
+cd app
+python main.py
+```
 
-L'application affiche ensuite :
+### Tests
 
-* les prévisions ;
-* les quantités à commander ;
-* les scénarios de demande ;
-* la comparaison des stratégies ;
-* les coûts associés ;
-* l'EVPI ;
-* le VSS.
+```bash
+pytest -v
+```
+
+The project has **44 tests** covering data loading, validation and cleaning, forecasting (including interval consistency and model-failure handling), optimization constraints and solution consistency, and a regression check of the L-shaped solver against the direct computation.
 
 ---
 
-# Structure du projet
+## Project structure
 
 ```text
 Supply Chain Optimizer/
-│
 ├── app/
-│   ├── data/
-│   │   └── ...
-│   │
-│   ├── forecasting/
-│   │   └── ...
-│   │
-│   ├── optimization/
-│   │   ├── lshaped.py
-│   │   └── ...
-│   │
+│   ├── data/             # loading, validation, cleaning
+│   ├── forecasting/      # Prophet, XGBoost, backtest selection
+│   ├── optimization/     # stochastic model, lshaped.py
 │   └── main.py
-│
 ├── frontend/
-│   └── app.py
-│
+│   └── app.py            # Streamlit interface
 ├── examples/
-│   ├── sample_beverages.csv
-│   ├── sample_retail.csv
-│   └── sample_port_traffic.csv
-│
+│   ├── sample_beverages.csv      # main demo: 5 products, 36 months
+│   ├── sample_retail.csv         # multi-product test: 8 products, 24 months
+│   └── sample_port_traffic.csv   # wrong schema on purpose, tests the validator
 ├── tests/
-│   └── ...
-│
 ├── requirements.txt
 └── README.md
 ```
 
 ---
 
-# Données d'exemple
+## Limitations
 
-| Fichier                   | Contenu                     | Usage                    |
-| ------------------------- | --------------------------- | ------------------------ |
-| `sample_beverages.csv`    | 5 boissons, 36 mois         | Démonstration principale |
-| `sample_retail.csv`       | 8 produits retail, 24 mois  | Test multi-produits      |
-| `sample_port_traffic.csv` | Données de trafic portuaire | Test du validateur       |
+- Only three demand scenarios per product (5% / 50% / 95% quantiles), which is a coarse approximation of the demand distribution.
+- One-month planning horizon.
+- Example datasets are for demonstration: [TODO: say whether they are synthetic or real, and if synthetic, say so here].
+- Forecast intervals have not been calibrated against coverage yet [TODO: remove this line if you have checked it].
 
-`sample_port_traffic.csv` permet notamment de vérifier que le système rejette proprement un fichier dont le format ne correspond pas au schéma attendu.
+## Roadmap
 
----
-
-# Tests
-
-Le projet contient **44 tests** couvrant notamment :
-
-* le chargement des données ;
-* la validation ;
-* le nettoyage ;
-* le forecasting ;
-* la cohérence des intervalles ;
-* la gestion des échecs de modèles ;
-* les contraintes d'optimisation ;
-* la cohérence des solutions ;
-* la non-régression du solveur L-shaped par rapport au calcul direct.
-
-Lancer les tests :
-
-```bash
-pytest -v
-```
+- [ ] HTTP API (`app/API/`)
+- [ ] `app/analysis/metrics.py`
+- [ ] Dockerfile and `docker-compose.yaml`
+- [ ] Deployment of the app
+- [ ] More scenarios and multi-month horizon
 
 ---
 
-# Installation
+## Tech stack
 
-Installer les dépendances :
-
-```bash
-pip install -r requirements.txt
-```
-
-## Lancer l'interface
-
-```bash
-streamlit run frontend/app.py
-```
-
-## Lancer la démonstration en ligne de commande
-
-```bash
-cd app
-python main.py
-```
-
----
-
-# Ce qui reste à développer
-
-Les prochaines évolutions prévues sont :
-
-* [ ] API HTTP dans `app/API/`
-* [ ] Implémentation de `app/analysis/metrics.py`
-* [ ] Containerisation avec `Dockerfile`
-* [ ] `docker-compose.yaml`
-* [ ] Déploiement de l'application
-
----
-
-# Technologies utilisées
-
-* **Python**
-* **Pandas / NumPy**
-* **Prophet**
-* **XGBoost**
-* **Scikit-learn**
-* **OR-Tools / optimisation**
-* **Streamlit**
-* **Pytest**
-* **Recherche opérationnelle**
-* **Programmation stochastique**
-* **Décomposition de Benders / L-shaped**
-* **Git / GitHub**
-
----
-
-## Résumé
-
-**Supply Chain Optimizer** combine deux domaines complémentaires :
-
-```text
-Machine Learning
-       │
-       │ Prévoir la demande
-       ▼
-Prévision + incertitude
-       │
-       │ Alimenter la décision
-       ▼
-Recherche opérationnelle
-       │
-       │ Optimiser sous contraintes
-       ▼
-Quantité optimale à commander
-```
-
-L'objectif n'est donc pas seulement de **prédire la demande**, mais de transformer cette prévision en **une décision d'approvisionnement économiquement optimisée**.
+Python, Pandas, NumPy, Prophet, XGBoost, scikit-learn, Streamlit, pytest, Git/GitHub. Optimization: L-shaped (Benders) decomposition for two-stage stochastic programming [TODO: add OR-Tools here only if the code actually uses it].

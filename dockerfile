@@ -16,6 +16,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY frontend ./frontend
 COPY examples ./examples
+COPY tests ./tests
 COPY config.yaml .
 
 EXPOSE 8501

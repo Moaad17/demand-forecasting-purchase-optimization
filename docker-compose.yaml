@@ -2,7 +2,7 @@ services:
   supply-chain-optimizer:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: dockerfile
 
     container_name: supply-chain-optimizer
 

@@ -71,7 +71,7 @@ def solve_lshaped(
 ) -> dict:
     """
     Résout le problème stochastique par décomposition de Benders /
-    L-shaped (single-cut, recours simple) -- cf. méthodologie, Étape 6.
+    L-shaped (single-cut, recours simple) -- cf. méthodologie.
 
     Sépare le problème en :
     - un MASTER : décide q (1ère étape) + une variable θ qui

@@ -1,0 +1,22 @@
+
+name: Supply Chain Optimizer CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker compose build
+
+      - name: Run tests
+        run: docker compose run --rm supply-chain-optimizer pytest -v tests/
